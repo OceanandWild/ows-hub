@@ -1,0 +1,59 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "OWS Hub",
+  "mainBinaryName": "ows-hub",
+  "version": "3.1.4",
+  "identifier": "com.oceanwildstudios.owshub",
+  "build": {
+    "frontendDist": "../app",
+    "devUrl": "http://localhost:8099",
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "npm run sync:app"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "OWS Hub — Ocean & Wild Studios",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 1024,
+        "minHeight": 640,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' https://owsdatabase.onrender.com https: data: blob:; script-src 'self' 'unsafe-inline' https:; style-src 'self' 'unsafe-inline' https:; img-src 'self' https: data: blob:; connect-src 'self' https://owsdatabase.onrender.com https:; media-src 'self' https: data: blob:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      },
+      "wix": {
+        "language": ["es-ES", "en-US"]
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "dialog": true,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ3RTVGMzMwQkI0MDI5RjcKUldUM0tVQzdNUFBsUjVNcE9zcitUd2R6a2lqcC9nQTdmYzdiM0YvVkQyOExHSHZobzBYYldMangK",
+      "endpoints": [
+        "https://github.com/OceanandWild/ows-hub/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

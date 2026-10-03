@@ -1,0 +1,84 @@
+name: release
+
+# Publica el instalador de OWS Hub como GitHub Release + manifiesto del updater.
+# El frontend (web/OWS) NO vive en este repo: se toma de owsdatabase en cada build,
+# así que la fuente única sigue siendo el monorepo.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Versión a publicar (ej: 3.1.4). Vacío = la de src-tauri/tauri.conf.json'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+env:
+  FRONTEND_REPO: OceanandWild/owsdatabase
+  FRONTEND_PATH: web/OWS
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch frontend (owsdatabase/web/OWS)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.FRONTEND_REPO }}
+          ref: main
+          path: .frontend-src
+          sparse-checkout: ${{ env.FRONTEND_PATH }}
+          sparse-checkout-cone-mode: false
+
+      - name: Sync frontend -> app
+        shell: pwsh
+        run: ./scripts/sync-app.ps1 -Source .frontend-src/web/OWS
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install deps
+        run: npm ci || npm install
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $cfg = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $v = "${{ inputs.version }}".Trim()
+          if (-not $v) { $v = [string]$cfg.version }
+          if (-not $v.StartsWith('v')) { $v = "v$v" }
+          $want = $v.TrimStart('v')
+          if ($want -ne [string]$cfg.version) {
+            Write-Host "[release] Actualizando tauri.conf.json a $want"
+            $raw = (Get-Content src-tauri/tauri.conf.json -Raw) -replace '"version":\s*"[0-9.]+"', "`"version`": `"$want`""
+            [IO.File]::WriteAllText((Resolve-Path src-tauri/tauri.conf.json), $raw)
+            $toml = (Get-Content src-tauri/Cargo.toml -Raw) -replace 'version = "[0-9.]+"', "version = `"$want`""
+            [IO.File]::WriteAllText((Resolve-Path src-tauri/Cargo.toml), $toml)
+            $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+            $pkg.version = $want
+            [IO.File]::WriteAllText((Resolve-Path package.json), ($pkg | ConvertTo-Json -Depth 10))
+          }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Build (NSIS + MSI)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx tauri build --no-bundle-version-check
+
+      - name: Publish release + updater manifest
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.ver.outputs.version }}
+        run: ./scripts/publish-release.ps1 -Tag $env:TAG

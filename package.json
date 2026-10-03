@@ -1,0 +1,16 @@
+{
+  "name": "ows-hub-desktop",
+  "version": "3.1.4",
+  "private": true,
+  "type": "module",
+  "description": "OWS Hub — launcher desktop de Ocean & Wild Studios (Tauri v2)",
+  "scripts": {
+    "sync:app": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sync-app.ps1",
+    "tauri": "tauri",
+    "dev": "npm run sync:app && tauri dev",
+    "build": "npm run sync:app && tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

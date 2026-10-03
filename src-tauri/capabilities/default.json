@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "OWS Hub desktop capabilities — biblioteca local de juegos",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "http:default",
+    "updater:default",
+    "notification:default",
+    "dialog:default",
+    "fs:allow-app-read-recursive",
+    "fs:allow-app-write-recursive",
+    {
+      "identifier": "fs:scope-app-recursive",
+      "allow": [{ "path": "$APPDATA/OWS/**" }]
+    }
+  ]
+}
