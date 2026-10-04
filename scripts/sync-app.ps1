@@ -1,4 +1,4 @@
-<#
+﻿<#
   OWS Hub — copia el frontend del panel (web/OWS) a ./app
 
   El frontend vive en el monorepo `owsdatabase` (web/OWS) y es la fuente

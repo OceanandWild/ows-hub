@@ -1,10 +1,12 @@
-<#
-  OWS Hub — publica los artefactos de `tauri build` como GitHub Release
-  y genera el manifiesto estático del updater (latest.json).
+﻿<#
+  OWS Hub - publica los artefactos de `tauri build` como GitHub Release
+  y genera el manifiesto estatico del updater (latest.json).
 
   Acepta:
-    -Tag        etiqueta de la release (ej: v3.1.4). Vacío = "v<tauri.conf.json>"
-    -DryRun     solo genera/valida el manifiesto sin subir nada
+    -Tag        etiqueta de la release (ej: v3.1.4). Vacio = "v<tauri.conf.json>"
+    -DryRun     solo valida/genera el manifiesto, sin subir nada
+
+  Requiere:  GITHUB_TOKEN (scope 'repo'), GH_REPO (por defecto OceanandWild/ows-hub)
 #>
 param(
   [string]$Tag = "",
@@ -19,57 +21,77 @@ $version = [string]$cfg.version
 if (-not $Tag) { $Tag = "v$version" }
 if (-not $env:GH_REPO) { $env:GH_REPO = "OceanandWild/ows-hub" }
 
-# ── 1) Recolectar artefactos (instalador + firma) ──
+# --- 1) Recolectar artefactos ---
 if (-not (Test-Path -LiteralPath $bundle)) {
   throw "No existe '$bundle'. Ejecuta `npx tauri build` primero."
 }
 
+# Solo los artefactos de la version actual: el directorio bundle/nsis acumula
+# instaladores de versiones anteriores.
 $assets = Get-ChildItem -LiteralPath $bundle -Recurse -File |
-  Where-Object { $_.Extension -in ".exe", ".msi" -and $_.Name -notmatch "unins" } |
+  Where-Object {
+    $_.Extension -in ".exe", ".msi" -and
+    $_.Name -notmatch "unins" -and
+    $_.Name -like "*$version*"
+  } |
   Sort-Object Name
 
-if (-not $assets) { throw "No se encontraron .exe/.msi en '$bundle'." }
+if (-not $assets) { throw "No se encontraron .exe/.msi de la version $version en '$bundle'." }
 
 # El updater de Tauri v2 necesita la firma (.sig) junto al binario.
+# Sin clave de firma (TAURI_SIGNING_PRIVATE_KEY) no hay .sig: la release se
+# publica igual (la descarga del navegador funciona) pero sin latest.json,
+# porque el updater no podria validar el binario.
+# GitHub sustituye espacios y caracteres raros del nombre del asset
+# ("OWS Hub_x64-setup.exe" -> "OWS.Hub_x64-setup.exe"). Publicamos con guiones
+# para que la URL de descarga sea estable y legible.
+function Get-AssetName([string]$fileName) {
+  $n = $fileName -replace '\s+', '-'
+  $n = $n -replace '[^\w\.\-]', ''
+  return $n
+}
+
 $platforms = [ordered]@{}
 $upload = @()
 
 foreach ($a in $assets) {
-  $upload += $a.FullName
+  $assetName = Get-AssetName $a.Name
+  $upload += @{ Path = $a.FullName; Name = $assetName }
   $sig = "$($a.FullName).sig"
   if (-not (Test-Path -LiteralPath $sig)) {
-    Write-Host "[publish] AVISO: sin firma para $($a.Name) — no irá al updater." -ForegroundColor Yellow
+    Write-Host "[publish] sin firma para $($a.Name) - no ira al updater." -ForegroundColor Yellow
     continue
   }
-  $upload += $sig
-  $key = if ($a.Extension -eq ".msi") { "windows-x86_64" } else { "windows-x86_64" }
-  $platforms[$key] = @{
+  $upload += @{ Path = $sig; Name = "$assetName.sig" }
+  $platforms["windows-x86_64"] = @{
     signature = ([IO.File]::ReadAllText($sig)).Trim()
-    url       = "https://github.com/$($env:GH_REPO)/releases/download/$Tag/$([Uri]::EscapeDataString($a.Name))"
+    url       = "https://github.com/$($env:GH_REPO)/releases/download/$Tag/$assetName"
   }
 }
 
-if (-not $platforms.Count) {
-  throw "Ningún artefacto tiene firma .sig: la release no sería instalable desde el updater."
-}
-
-$latest = [ordered]@{
-  version   = $version
-  notes     = "OWS Hub $Tag — instalador de Windows. Las descargas del navegador requieren esta app."
-  pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-  platforms = $platforms
-}
 $latestPath = Join-Path $root "latest.json"
-[IO.File]::WriteAllText($latestPath, ($latest | ConvertTo-Json -Depth 8))
-$upload    += $latestPath
+if ($platforms.Count) {
+  $latest = [ordered]@{
+    version   = $version
+    notes     = "OWS Hub $Tag - instalador de Windows. Las descargas del navegador requieren esta app."
+    pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    platforms = $platforms
+  }
+  [IO.File]::WriteAllText($latestPath, ($latest | ConvertTo-Json -Depth 8))
+  $upload += @{ Path = $latestPath; Name = "latest.json" }
+  Write-Host "[publish] Manifiesto del updater: $latestPath"
+} else {
+  if (Test-Path -LiteralPath $latestPath) { Remove-Item -LiteralPath $latestPath -Force }
+  Write-Host "[publish] SIN clave de firma: se publica la release sin latest.json." -ForegroundColor Yellow
+  Write-Host "[publish] El updater quedara inactivo hasta configurar TAURI_SIGNING_PRIVATE_KEY." -ForegroundColor Yellow
+}
 
 Write-Host "[publish] Release $Tag ($($assets.Count) artefactos):"
-$assets | ForEach-Object { Write-Host "  - $($_.Name) ($([math]::Round($_.Length/1MB,1)) MB)" }
-Write-Host "[publish] Manifiesto: $latestPath"
+$assets | ForEach-Object { Write-Host "  - $(Get-AssetName $_.Name) ($([math]::Round($_.Length/1MB,1)) MB)" }
 
-if ($DryRun) { Write-Host "[publish] DryRun: no se subió nada." -ForegroundColor Yellow; exit 0 }
+if ($DryRun) { Write-Host "[publish] DryRun: no se subio nada." -ForegroundColor Yellow; exit 0 }
 
-# ── 2) Crear/actualizar la release ──
+# --- 2) Crear / actualizar la release ---
 $owner = $env:GH_REPO.Split("/")[0]
 $repo  = $env:GH_REPO.Split("/")[1]
 $api   = "https://api.github.com/repos/$owner/$repo"
@@ -78,14 +100,21 @@ $hdr   = @{ Authorization = "Bearer $env:GITHUB_TOKEN"; Accept = "application/vn
 $existing = $null
 try { $existing = Invoke-RestMethod -Uri "$api/releases/tags/$Tag" -Headers $hdr } catch { }
 
+$notes = @(
+  "OWS Hub $Tag",
+  "",
+  "Instalador de Windows (NSIS) + MSI multi-idioma.",
+  "",
+  "Esta app es **obligatoria** para continuar con las descargas del ecosistema: en el navegador las descargas estan bloqueadas.",
+  "",
+  "- [Re releases del Hub](https://github.com/$($env:GH_REPO)/releases)"
+)
+if (-not $platforms.Count) {
+  $notes += @("", "> Publicada sin firma de updater: la descarga del instalador funciona, pero la auto-actualizacion quedara inactiva hasta configurar la clave de firma.")
+}
+
 if (-not $existing) {
-  $body = @{
-    tag_name = $Tag
-    name     = "OWS Hub $Tag"
-    body     = "OWS Hub $Tag`n`nInstalador de Windows (NSIS) + manifiesto del updater (``latest.json``).`n`nEsta app es **obligatoria** para continuar con las descargas del ecosistema: en el navegador las descargas estan bloqueadas."
-    draft    = $false
-    prerelease = $false
-  } | ConvertTo-Json
+  $body = @{ tag_name = $Tag; name = "OWS Hub $Tag"; body = ($notes -join "`n"); draft = $false; prerelease = $false } | ConvertTo-Json
   $release = Invoke-RestMethod -Uri "$api/releases" -Method Post -Headers $hdr -ContentType "application/json" -Body ([Text.Encoding]::UTF8.GetBytes($body))
   Write-Host "[publish] Release creada: $($release.html_url)"
 } else {
@@ -96,13 +125,12 @@ if (-not $existing) {
 # La plantilla de subida viene en release.upload_url (".../assets{?name,label}").
 $uploadUrl = ([string]$release.upload_url) -replace '\{.*\}$', ''
 
-foreach ($f in $upload) {
-  $name = Split-Path -Leaf $f
+foreach ($item in $upload) {
+  $f    = if ($item -is [hashtable]) { $item.Path } else { $item }
+  $name = if ($item -is [hashtable]) { $item.Name } else { Get-AssetName (Split-Path -Leaf $f) }
   # Reemplaza el asset anterior si existe (mismo nombre).
-  $existing = @($release.assets) | Where-Object { $_.name -eq $name } | Select-Object -First 1
-  if ($existing) {
-    Invoke-RestMethod -Uri $existing.url -Method Delete -Headers $hdr -ErrorAction SilentlyContinue | Out-Null
-  }
+  $old = @($release.assets) | Where-Object { $_.name -eq $name } | Select-Object -First 1
+  if ($old) { Invoke-RestMethod -Uri $old.url -Method Delete -Headers $hdr -ErrorAction SilentlyContinue | Out-Null }
   Write-Host "[publish] Subiendo $name ($([math]::Round((Get-Item $f).Length/1MB,1)) MB) ..."
   $bytes = [IO.File]::ReadAllBytes($f)
   Invoke-RestMethod -Uri "$uploadUrl`?name=$([Uri]::EscapeDataString($name))" -Method Post `
@@ -110,4 +138,6 @@ foreach ($f in $upload) {
 }
 
 Write-Host "[publish] OK -> $($release.html_url)" -ForegroundColor Green
-Write-Host "[publish] Updater: https://github.com/$($env:GH_REPO)/releases/latest/download/latest.json"
+if ($platforms.Count) {
+  Write-Host "[publish] Updater: https://github.com/$($env:GH_REPO)/releases/latest/download/latest.json"
+}
