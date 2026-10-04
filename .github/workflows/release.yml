@@ -85,4 +85,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ steps.ver.outputs.version }}
+          # publish-release.ps1 firma a mano los instaladores si el bundler
+          # no dejo .sig: sin estas dos env no hay latest.json y el updater
+          # queda inactivo (eso paso en el primer run de v3.2.0).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: ./scripts/publish-release.ps1 -Tag $env:TAG
