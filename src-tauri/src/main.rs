@@ -421,6 +421,159 @@ fn launch_game(exe_path: String) -> Result<(), String> {
     Ok(())
 }
 
+// ═══════════════════════════════════════════════════════
+// DESINSTALAR
+//
+// Borrar desde el frontend es la operación más peligrosa del Hub: `dir` viene
+// del WebView y podría ser cualquier ruta del disco. Por eso solo se acepta
+// una carpeta que sea HIJA DIRECTA de una raíz de biblioteca conocida (la
+// por defecto %APPDATA%/OWS/library o la personalizada en el setup), nunca la
+// raíz ni una carpeta fuera, y nunca a través de un enlace simbólico.
+// ═══════════════════════════════════════════════════════
+
+/// Tamaño total en disco de una carpeta (bytes). No sigue enlaces simbólicos.
+fn dir_size(path: &Path) -> u64 {
+    let mut total = 0u64;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            match e.file_type() {
+                Ok(ft) if ft.is_symlink() => continue, // nunca atravesar un link
+                Ok(ft) if ft.is_dir() => stack.push(p),
+                Ok(_) => {
+                    if let Ok(m) = e.metadata() {
+                        total += m.len();
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+    total
+}
+
+/// Resuelve la ruta real (absoluta, con symlinks resueltos) para comparar.
+fn real_path(p: &Path) -> Result<PathBuf, String> {
+    std::fs::canonicalize(p).map_err(|e| format!("no se pudo resolver {}: {e}", p.display()))
+}
+
+/// Devuelve la carpeta a borrar solo si es una carpeta de juego legítima.
+fn safe_game_dir(
+    app: &AppHandle,
+    dir: &str,
+    library_base: Option<&str>,
+) -> Result<PathBuf, String> {
+    let raw = dir.trim();
+    if raw.is_empty() {
+        return Err("no se indicó qué juego desinstalar".to_string());
+    }
+    let target = real_path(Path::new(raw))?;
+
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let default_root = library_root(app)?;
+    if default_root.exists() {
+        roots.push(real_path(&default_root)?);
+    }
+    // La biblioteca personalizada del setup es una raíz válida también.
+    if let Some(base) = library_base {
+        let b = PathBuf::from(base.trim());
+        if b.exists() {
+            roots.push(real_path(&b)?);
+        }
+    }
+    if roots.is_empty() {
+        return Err("no se pudo resolver la biblioteca de juegos del Hub".to_string());
+    }
+
+    for root in roots {
+        // Solo hijas directas de la raíz (una carpeta = un juego).
+        if target.parent() != Some(root.as_path()) {
+            continue;
+        }
+        if !target.starts_with(&root) {
+            continue;
+        }
+        if !target.is_dir() {
+            return Err("esa carpeta de juego ya no existe".to_string());
+        }
+        return Ok(target);
+    }
+
+    Err("solo se puede desinstalar una carpeta de juego de la biblioteca del Hub".to_string())
+}
+
+/// Tamaño en disco de la carpeta de un juego (bytes). 0 si no existe.
+#[tauri::command]
+fn game_dir_size(dir: String) -> Result<u64, String> {
+    let p = PathBuf::from(dir.trim());
+    if !p.is_dir() {
+        return Ok(0);
+    }
+    Ok(dir_size(&p))
+}
+
+/// Borra la carpeta de un juego instalado y devuelve lo que quedó libre.
+/// Reintenta unos segundos porque Windows bloquea el borrado si el juego (o su
+/// lanzador) sigue abierto.
+#[tauri::command]
+async fn uninstall_game(
+    app: AppHandle,
+    dir: String,
+    library_base: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let target = safe_game_dir(&app, &dir, library_base.as_deref())?;
+    let bytes = dir_size(&target);
+    let name = target
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let _ = app.emit(
+        "ows-uninstall-progress",
+        serde_json::json!({ "phase": "removing", "dir": target.to_string_lossy(), "bytes": bytes }),
+    );
+
+    let to_remove = target.clone();
+    let removed: Result<(), String> = tauri::async_runtime::spawn_blocking(move || {
+        let mut last = String::new();
+        for attempt in 0..5u64 {
+            match std::fs::remove_dir_all(&to_remove) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    last = e.to_string();
+                    std::thread::sleep(std::time::Duration::from_millis(300 * (attempt + 1)));
+                }
+            }
+        }
+        Err(last)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if let Err(err) = removed {
+        let lower = err.to_lowercase();
+        if lower.contains("denied")
+            || lower.contains("being used")
+            || lower.contains("used by another process")
+            || lower.contains("cannot find")
+        {
+            return Err(
+                "No se pudo borrar: el juego está abierto. Ciérralo y vuelve a intentarlo."
+                    .to_string(),
+            );
+        }
+        return Err(format!("No se pudo borrar la carpeta del juego: {err}"));
+    }
+
+    let _ = app.emit(
+        "ows-uninstall-progress",
+        serde_json::json!({ "phase": "done", "dir": name }),
+    );
+    Ok(serde_json::json!({ "dir": name, "bytes": bytes }))
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
@@ -434,7 +587,9 @@ fn main() {
             download_installer,
             extract_zip,
             find_game_exe,
-            launch_game
+            launch_game,
+            game_dir_size,
+            uninstall_game
         ])
         .run(tauri::generate_context!())
         .expect("error while running OWS Hub");
