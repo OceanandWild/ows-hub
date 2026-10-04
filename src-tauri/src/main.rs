@@ -459,15 +459,42 @@ fn real_path(p: &Path) -> Result<PathBuf, String> {
     std::fs::canonicalize(p).map_err(|e| format!("no se pudo resolver {}: {e}", p.display()))
 }
 
+/// Valida `target` contra la lista de raíces ya canonicalizadas.
+/// Solo acepta hijas directas (una carpeta = un juego).
+fn resolve_game_dir(target: &Path, roots: &[PathBuf]) -> Result<PathBuf, String> {
+    for root in roots {
+        if target.parent() != Some(root.as_path()) {
+            continue;
+        }
+        if !target.starts_with(root) {
+            continue;
+        }
+        if !target.is_dir() {
+            return Err("esa carpeta de juego ya no existe".to_string());
+        }
+        return Ok(target.to_path_buf());
+    }
+
+    let mut permitidas: Vec<String> = roots.iter().map(|r| r.to_string_lossy().to_string()).collect();
+    permitidas.dedup();
+    Err(format!(
+        "La carpeta '{}' no esta dentro de una biblioteca del Hub (bibliotecas: {}).",
+        target.display(),
+        permitidas.join(" | ")
+    ))
+}
+
 /// Devuelve la carpeta a borrar solo si es una carpeta de juego legítima.
+/// `library_bases` son las carpetas que el frontend declara como biblioteca
+/// (la personalizada del setup y/o la detectada); todas se tratan igual.
 fn safe_game_dir(
     app: &AppHandle,
     dir: &str,
-    library_base: Option<&str>,
+    library_bases: Option<&[String]>,
 ) -> Result<PathBuf, String> {
     let raw = dir.trim();
     if raw.is_empty() {
-        return Err("no se indicó qué juego desinstalar".to_string());
+        return Err("no se indico que juego desinstalar".to_string());
     }
     let target = real_path(Path::new(raw))?;
 
@@ -476,32 +503,24 @@ fn safe_game_dir(
     if default_root.exists() {
         roots.push(real_path(&default_root)?);
     }
-    // La biblioteca personalizada del setup es una raíz válida también.
-    if let Some(base) = library_base {
+    for base in library_bases.unwrap_or(&[]) {
         let b = PathBuf::from(base.trim());
-        if b.exists() {
+        if b.is_dir() {
             roots.push(real_path(&b)?);
         }
     }
-    if roots.is_empty() {
+    // Dedup por ruta canonica (la detectada y la guardada suelen coincidir).
+    let mut uniq: Vec<PathBuf> = Vec::new();
+    for r in roots {
+        if !uniq.contains(&r) {
+            uniq.push(r);
+        }
+    }
+    if uniq.is_empty() {
         return Err("no se pudo resolver la biblioteca de juegos del Hub".to_string());
     }
 
-    for root in roots {
-        // Solo hijas directas de la raíz (una carpeta = un juego).
-        if target.parent() != Some(root.as_path()) {
-            continue;
-        }
-        if !target.starts_with(&root) {
-            continue;
-        }
-        if !target.is_dir() {
-            return Err("esa carpeta de juego ya no existe".to_string());
-        }
-        return Ok(target);
-    }
-
-    Err("solo se puede desinstalar una carpeta de juego de la biblioteca del Hub".to_string())
+    resolve_game_dir(&target, &uniq)
 }
 
 /// Tamaño en disco de la carpeta de un juego (bytes). 0 si no existe.
@@ -521,9 +540,9 @@ fn game_dir_size(dir: String) -> Result<u64, String> {
 async fn uninstall_game(
     app: AppHandle,
     dir: String,
-    library_base: Option<String>,
+    library_bases: Option<Vec<String>>,
 ) -> Result<serde_json::Value, String> {
-    let target = safe_game_dir(&app, &dir, library_base.as_deref())?;
+    let target = safe_game_dir(&app, &dir, library_bases.as_deref())?;
     let bytes = dir_size(&target);
     let name = target
         .file_name()
@@ -593,4 +612,71 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running OWS Hub");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // tmp/ows-hub-test/{root/juego/sub, otra-raiz/juego2}. Se construye una
+    // sola vez (los tests corren en paralelo: nada de remove_dir_all aquí).
+    fn make_tree() -> PathBuf {
+        static ONCE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        ONCE.get_or_init(|| {
+            let base = std::env::temp_dir().join("ows-hub-test");
+            let root = base.join("root");
+            let game = root.join("juego");
+            let _ = std::fs::create_dir_all(game.join("sub"));
+            let _ = std::fs::write(game.join("sub").join("data.bin"), vec![0u8; 2048]);
+            let _ = std::fs::write(root.join("sibling.txt"), b"x");
+            let _ = std::fs::create_dir_all(base.join("otra-raiz").join("juego2"));
+            std::fs::canonicalize(&base).unwrap()
+        })
+        .clone()
+    }
+
+    #[test]
+    fn acepta_hija_directa_de_la_biblioteca() {
+        let base = make_tree();
+        let roots = vec![std::fs::canonicalize(base.join("root")).unwrap()];
+        let game = std::fs::canonicalize(base.join("root").join("juego")).unwrap();
+        assert!(resolve_game_dir(&game, &roots).is_ok());
+    }
+
+    #[test]
+    fn acepta_una_de_varias_roots() {
+        let base = make_tree();
+        let roots = vec![
+            std::fs::canonicalize(base.join("root")).unwrap(),
+            std::fs::canonicalize(base.join("otra-raiz")).unwrap(),
+        ];
+        let game = std::fs::canonicalize(base.join("otra-raiz").join("juego2")).unwrap();
+        assert!(resolve_game_dir(&game, &roots).is_ok());
+    }
+
+    #[test]
+    fn rechaza_la_raiz_misma() {
+        let base = make_tree();
+        let root = std::fs::canonicalize(base.join("root")).unwrap();
+        assert!(resolve_game_dir(&root, &[root.clone()]).is_err());
+    }
+
+    #[test]
+    fn rechaza_nietos_y_hermanos() {
+        let base = make_tree();
+        let roots = vec![std::fs::canonicalize(base.join("root")).unwrap()];
+        // nieto: root/juego/sub  -> no es hijo directo
+        let sub = std::fs::canonicalize(base.join("root").join("juego").join("sub")).unwrap();
+        assert!(resolve_game_dir(&sub, &roots).is_err());
+        // hermano: base/otra-raiz -> fuera de la raiz
+        let fuera = std::fs::canonicalize(base.join("otra-raiz")).unwrap();
+        assert!(resolve_game_dir(&fuera, &roots).is_err());
+    }
+
+    #[test]
+    fn dir_size_cuenta_los_archivos() {
+        let base = make_tree();
+        let game = base.join("root").join("juego");
+        assert_eq!(dir_size(&game), 2048);
+    }
 }
