@@ -533,9 +533,149 @@ fn game_dir_size(dir: String) -> Result<u64, String> {
     Ok(dir_size(&p))
 }
 
+/// Quita el atributo "solo lectura" de todo el árbol.
+///
+/// OJO: en Windows `std::fs::Permissions::set_readonly()` SOLO cambia el valor
+/// en memoria (modifica un bit de un struct y no llama al sistema), así que no
+/// sirve para nada aquí. Hay que hablar con Windows de verdad: `attrib` forma
+/// parte del sistema y quita el atributo recursivamente.
+fn clear_readonly(path: &Path) {
+    let target = path.display().to_string();
+    // El directorio y todo lo que hay debajo, archivos y carpetas.
+    let _ = std::process::Command::new("attrib")
+        .arg("-R")
+        .arg(&target)
+        .arg("/S")
+        .arg("/D")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    // `attrib` con comodín cubre el contenido; esto cubre la propia raíz.
+    let _ = std::process::Command::new("attrib")
+        .arg("-R")
+        .arg(format!("{target}\\*"))
+        .arg("/S")
+        .arg("/D")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+/// ¿Hay un .exe de esta carpeta en ejecución?
+///
+/// Truco sin dependencias: un ejecutable cargado por Windows no se puede abrir
+/// para escritura. Un archivo solo lectura también falla, así que se descarta
+/// ese caso para no dar falsos positivos.
+fn is_game_running(dir: &Path) -> bool {
+    let mut stack = vec![(dir.to_path_buf(), 0u8)];
+    let mut checked = 0usize;
+    while let Some((d, depth)) = stack.pop() {
+        if depth > 2 {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            match e.file_type() {
+                Ok(ft) if ft.is_symlink() => continue,
+                Ok(ft) if ft.is_dir() => stack.push((p, depth + 1)),
+                Ok(_) => {
+                    let is_exe = p
+                        .extension()
+                        .map(|x| x.eq_ignore_ascii_case("exe"))
+                        .unwrap_or(false);
+                    if !is_exe {
+                        continue;
+                    }
+                    checked += 1;
+                    if checked > 40 {
+                        return false; // no escanear un árbol enorme
+                    }
+                    let Ok(meta) = std::fs::metadata(&p) else { continue };
+                    if meta.permissions().readonly() {
+                        continue;
+                    }
+                    if std::fs::OpenOptions::new().write(true).open(&p).is_err() {
+                        return true;
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+    false
+}
+
+/// Traduce el error de Windows a algo que el usuario entienda.
+/// Se mira `raw_os_error()` (numero) y NO el texto: en Windows el mensaje sale
+/// en el idioma del sistema ("Acceso denegado", "Access denied"...).
+fn friendly_uninstall_error(e: &std::io::Error, running: bool) -> String {
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    match e.raw_os_error() {
+        Some(ERROR_ACCESS_DENIED) => {
+            if running {
+                "No se pudo borrar: el juego sigue abierto. Ciérralo (y su lanzador) y reinténtalo.".to_string()
+            } else {
+                "No se pudo borrar: Windows denegó el acceso. Cierra el juego y el explorador de archivos, y reinténtalo.".to_string()
+            }
+        }
+        Some(ERROR_SHARING_VIOLATION) | Some(ERROR_LOCK_VIOLATION) => {
+            "No se pudo borrar: hay un archivo del juego en uso. Cierra el juego y reinténtalo.".to_string()
+        }
+        _ => {
+            let code = e.raw_os_error().map(|c| c.to_string()).unwrap_or_default();
+            if code.is_empty() {
+                format!("No se pudo borrar la carpeta del juego: {e}")
+            } else {
+                format!("No se pudo borrar la carpeta del juego: {e} (codigo {code})")
+            }
+        }
+    }
+}
+
+/// Sufijo de las carpetas apartadas para borrado diferido.
+const PENDING_SUFFIX: &str = ".__borrando__";
+
+/// Al arrancar el Hub, limpia lo que quedó a medias en una desinstalación
+/// anterior (el juego ya salía de la biblioteca, pero la carpeta no se pudo
+/// borrar porque estaba en uso). Se ejecuta con la app cerrada, así que ya no
+/// hay Handles: el borrado sí funciona.
+#[tauri::command]
+fn sweep_pending_removals(app: AppHandle) -> Result<usize, String> {
+    let mut pending: Vec<PathBuf> = Vec::new();
+    let mut roots: Vec<PathBuf> = vec![library_root(&app)?];
+
+    for root in roots.iter_mut() {
+        let Ok(entries) = std::fs::read_dir(&root) else { continue };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.ends_with(PENDING_SUFFIX) {
+                pending.push(e.path());
+            }
+        }
+    }
+
+    let mut done = 0usize;
+    for p in pending {
+        clear_readonly(&p);
+        if std::fs::remove_dir_all(&p).is_ok() {
+            done += 1;
+        }
+    }
+    Ok(done)
+}
+
 /// Borra la carpeta de un juego instalado y devuelve lo que quedó libre.
-/// Reintenta unos segundos porque Windows bloquea el borrado si el juego (o su
-/// lanzador) sigue abierto.
+///
+/// Borrado en dos fases porque en Windows un archivo abierto (el juego en
+/// marcha, un antivirus, el explorador) bloquea `remove_dir_all` con
+/// ERROR_ACCESS_DENIED y el juego queda "a medias":
+///   1) reintentos con `clear_readonly` + espera.
+///   2) si no se puede, se aparta la carpeta a `<slug>.__borrando__`; así el
+///      juego desaparece de la biblioteca al instante y `sweep_pending_removals`
+///      la borra de verdad al siguiente arranque (con la app ya cerrada).
 #[tauri::command]
 async fn uninstall_game(
     app: AppHandle,
@@ -555,42 +695,55 @@ async fn uninstall_game(
     );
 
     let to_remove = target.clone();
-    let removed: Result<(), String> = tauri::async_runtime::spawn_blocking(move || {
-        let mut last = String::new();
-        for attempt in 0..5u64 {
-            match std::fs::remove_dir_all(&to_remove) {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    last = e.to_string();
-                    std::thread::sleep(std::time::Duration::from_millis(300 * (attempt + 1)));
+    let outcome: Result<(bool, String), String> =
+        tauri::async_runtime::spawn_blocking(move || {
+            // Los ZIP de juego traen archivos en solo lectura y otros procesos
+            // pueden tenerlos abiertos: se limpia el atributo antes de intentar.
+            clear_readonly(&to_remove);
+            let mut last: Option<std::io::Error> = None;
+
+            for attempt in 0..5u64 {
+                match std::fs::remove_dir_all(&to_remove) {
+                    Ok(()) => return Ok((true, String::new())),
+                    Err(e) => {
+                        last = Some(e);
+                        std::thread::sleep(std::time::Duration::from_millis(250 * (attempt + 1)));
+                        clear_readonly(&to_remove);
+                    }
                 }
             }
-        }
-        Err(last)
-    })
-    .await
-    .map_err(|e| e.to_string())?;
 
-    if let Err(err) = removed {
-        let lower = err.to_lowercase();
-        if lower.contains("denied")
-            || lower.contains("being used")
-            || lower.contains("used by another process")
-            || lower.contains("cannot find")
-        {
-            return Err(
-                "No se pudo borrar: el juego está abierto. Ciérralo y vuelve a intentarlo."
-                    .to_string(),
-            );
-        }
-        return Err(format!("No se pudo borrar la carpeta del juego: {err}"));
-    }
+            // Fase 2: apartar la carpeta. Es un rename, que Windows suele
+            // permitir aunque el contenido esté en uso.
+            let parked = PathBuf::from(format!(
+                "{}{}",
+                to_remove.to_string_lossy(),
+                PENDING_SUFFIX
+            ));
+            if std::fs::rename(&to_remove, &parked).is_ok() {
+                return Ok((false, parked.to_string_lossy().to_string()));
+            }
 
+            // Ni borrar ni renombrar: hay un bloqueo real.
+            let err = last.unwrap_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::Other, "borrado fallido")
+            });
+            Err(friendly_uninstall_error(&err, is_game_running(&to_remove)))
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let (borrado, pendiente) = outcome?;
     let _ = app.emit(
         "ows-uninstall-progress",
         serde_json::json!({ "phase": "done", "dir": name }),
     );
-    Ok(serde_json::json!({ "dir": name, "bytes": bytes }))
+    Ok(serde_json::json!({
+        "dir": name,
+        "bytes": bytes,
+        "deleted": borrado,
+        "pending": pendiente,
+    }))
 }
 
 fn main() {
@@ -608,7 +761,8 @@ fn main() {
             find_game_exe,
             launch_game,
             game_dir_size,
-            uninstall_game
+            uninstall_game,
+            sweep_pending_removals
         ])
         .run(tauri::generate_context!())
         .expect("error while running OWS Hub");
@@ -678,5 +832,82 @@ mod tests {
         let base = make_tree();
         let game = base.join("root").join("juego");
         assert_eq!(dir_size(&game), 2048);
+    }
+
+    #[test]
+    fn clear_readonly_habilita_el_borrado() {
+        // Contrato real de clear_readonly: quitar el atributo de verdad.
+        // (En Windows moderno borrar un archivo solo lectura suele funcionar
+        // igual, asi que no se exige que remove_dir_all falle antes.)
+        let base = std::env::temp_dir().join("ows-hub-test-ro");
+        let game = base.join("game");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(game.join("data")).unwrap();
+        let file = game.join("data").join("asset.bin");
+        std::fs::write(&file, vec![7u8; 4096]).unwrap();
+
+        // Marcar en solo lectura de verdad (attrib, no Permissions::set_readonly,
+        // que en Windows solo cambia el valor en memoria).
+        let st = std::process::Command::new("attrib")
+            .arg("+R")
+            .arg(file.display().to_string())
+            .stdout(std::process::Stdio::null())
+            .status();
+        if !st.map(|s| s.success()).unwrap_or(false) {
+            return; // entorno sin attrib: nada que verificar
+        }
+        assert!(
+            std::fs::metadata(&file).unwrap().permissions().readonly(),
+            "attrib +R deberia marcar el archivo como solo lectura"
+        );
+
+        clear_readonly(&game);
+        assert!(
+            !std::fs::metadata(&file).unwrap().permissions().readonly(),
+            "clear_readonly debe quitar el atributo de verdad"
+        );
+        let _ = std::fs::remove_dir_all(&game);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn carpeta_apartada_para_borrado_diferido() {
+        // Fase 2: si no se puede borrar, la carpeta se aparta con el sufijo
+        // y sweep_pending_removals la limpia al siguiente arranque.
+        let base = std::env::temp_dir().join("ows-hub-test-park");
+        let root = base.join("library");
+        let game = root.join("juego");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(game.join("data")).unwrap();
+        std::fs::write(game.join("data").join("a.bin"), vec![1u8; 128]).unwrap();
+
+        let parked = PathBuf::from(format!(
+            "{}{}",
+            game.to_string_lossy(),
+            PENDING_SUFFIX
+        ));
+        std::fs::rename(&game, &parked).unwrap();
+        assert!(!game.exists(), "la carpeta original debe desaparecer ya");
+        assert!(parked.exists());
+        assert!(parked.to_string_lossy().ends_with(PENDING_SUFFIX));
+
+        // El sweep la borra (logica aislada de safe_game_dir para poder testear).
+        clear_readonly(&parked);
+        assert!(std::fs::remove_dir_all(&parked).is_ok());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn friendly_uninstall_error_traduce_por_codigo_no_por_texto() {
+        // El texto sale en el idioma del sistema: hay que mirar el codigo.
+        let denied = std::io::Error::from_raw_os_error(5);
+        let running = friendly_uninstall_error(&denied, true);
+        assert!(running.contains("abierto"), "esperado mensaje de juego abierto: {running}");
+
+        let sharing = std::io::Error::from_raw_os_error(32);
+        assert!(friendly_uninstall_error(&sharing, false).contains("en uso"));
+
+        let otro = std::io::Error::from_raw_os_error(3);
+        assert!(friendly_uninstall_error(&otro, false).contains("codigo 3"));
     }
 }
