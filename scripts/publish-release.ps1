@@ -59,8 +59,23 @@ foreach ($a in $assets) {
   $upload += @{ Path = $a.FullName; Name = $assetName }
   $sig = "$($a.FullName).sig"
   if (-not (Test-Path -LiteralPath $sig)) {
-    Write-Host "[publish] sin firma para $($a.Name) - no ira al updater." -ForegroundColor Yellow
-    continue
+    # El bundler solo deja .sig junto al binario cuando genera updater
+    # artifacts; si falta pero hay clave de firma, se firma a mano con
+    # `tauri signer sign` (el updater verifica los bytes del instalador
+    # contra latest.json, así que vale igual). Sin clave no hay updater.
+    $keyPath = $env:TAURI_SIGNING_PRIVATE_KEY_PATH
+    if ([string]::IsNullOrWhiteSpace($keyPath)) { $keyPath = Join-Path $env:USERPROFILE ".tauri\ows-hub.key" }
+    $hasKey = (Test-Path -LiteralPath $keyPath) -or (-not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY))
+    if ($hasKey) {
+      Write-Host "[publish] firmando $($a.Name) a mano..." -ForegroundColor Cyan
+      $signArgs = @('tauri', 'signer', 'sign', $a.FullName, '--app-version', $version)
+      if (Test-Path -LiteralPath $keyPath) { $signArgs += @('--private-key-path', $keyPath) }
+      & npx @signArgs
+      if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $sig)) { throw "No se pudo firmar $($a.Name)" }
+    } else {
+      Write-Host "[publish] sin firma para $($a.Name) - no ira al updater." -ForegroundColor Yellow
+      continue
+    }
   }
   $upload += @{ Path = $sig; Name = "$assetName.sig" }
   $platforms["windows-x86_64"] = @{
