@@ -73,8 +73,9 @@ jobs:
       - name: Build (NSIS + MSI)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Secrets del repo: KEY (clave de firma), PASSWORD (su password).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.PASSWORD }}
         # Sin flags extra: el CLI 2.x no tiene --no-bundle-version-check
         # (ese flag inexistente tumbaba este paso al instante).
         run: npx tauri build
@@ -82,12 +83,13 @@ jobs:
       - name: Publish release + updater manifest
         shell: pwsh
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GH_PAT (token con scope repo) para crear la release.
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ steps.ver.outputs.version }}
           # publish-release.ps1 firma a mano los instaladores si el bundler
           # no dejo .sig: sin estas dos env no hay latest.json y el updater
           # queda inactivo (eso paso en el primer run de v3.2.0).
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.PASSWORD }}
         run: ./scripts/publish-release.ps1 -Tag $env:TAG

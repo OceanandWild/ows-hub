@@ -1,6 +1,6 @@
 {
   "name": "ows-hub-desktop",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "private": true,
   "type": "module",
   "description": "OWS Hub — launcher desktop de Ocean & Wild Studios (Tauri v2)",

@@ -14,6 +14,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# Nombres alternativos de secrets (repo ows-hub): KEY = clave de firma,
+# PASSWORD = su password, GH_PAT = token con scope repo. Se aceptan con
+# cualquiera de los dos nombres para no obligar a renombrar nada.
+if (-not $env:TAURI_SIGNING_PRIVATE_KEY -and $env:KEY) { $env:TAURI_SIGNING_PRIVATE_KEY = $env:KEY }
+if (-not $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -and $env:PASSWORD) { $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $env:PASSWORD }
+if (-not $env:GITHUB_TOKEN -and $env:GH_PAT) { $env:GITHUB_TOKEN = $env:GH_PAT }
 $root    = Split-Path -Parent $PSScriptRoot
 $bundle  = Join-Path $root "src-tauri\target\release\bundle"
 $cfg     = Get-Content (Join-Path $root "src-tauri\tauri.conf.json") -Raw | ConvertFrom-Json
