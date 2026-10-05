@@ -76,8 +76,16 @@ foreach ($a in $assets) {
       Write-Host "[publish] firmando $($a.Name) a mano..." -ForegroundColor Cyan
       $signArgs = @('tauri', 'signer', 'sign', $a.FullName, '--app-version', $version)
       if (Test-Path -LiteralPath $keyPath) { $signArgs += @('--private-key-path', $keyPath) }
-      & npx @signArgs
-      if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $sig)) { throw "No se pudo firmar $($a.Name)" }
+      # El CLI no acepta --private-key y --private-key-path a la vez: si se
+      # usa el archivo, la env se retira solo durante la firma y se restaura.
+      $savedKey = $env:TAURI_SIGNING_PRIVATE_KEY
+      if (($signArgs -contains '--private-key-path') -and $savedKey) { Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY }
+      try {
+        & npx @signArgs
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $sig)) { throw "No se pudo firmar $($a.Name)" }
+      } finally {
+        if ($savedKey) { $env:TAURI_SIGNING_PRIVATE_KEY = $savedKey }
+      }
     } else {
       Write-Host "[publish] sin firma para $($a.Name) - no ira al updater." -ForegroundColor Yellow
       continue
