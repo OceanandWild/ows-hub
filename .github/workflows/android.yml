@@ -64,7 +64,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Capacitor CLI 8 exige Node >= 22.
+          node-version: 22
           cache: npm
           cache-dependency-path: OWS-Android/package-lock.json
 
@@ -174,6 +175,10 @@ jobs:
             fi
           fi
 
+          # Enmascara las contraseñas generadas/restauradas: si no, el runner
+          # las imprime en los logs del job (repo público).
+          echo "::add-mask::$STOREPASS"
+          echo "::add-mask::$KEYPASS"
           {
             echo "OWS_KEYSTORE_PATH=$KS_DIR/release.keystore"
             echo "OWS_KEYSTORE_PASSWORD=$STOREPASS"
