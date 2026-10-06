@@ -1,0 +1,24 @@
+{
+  "appId": "com.oceanandwild.owshub",
+  "appName": "OWS Hub",
+  "webDir": "../app",
+  "backgroundColor": "#050a12",
+  "android": {
+    "allowMixedContent": false,
+    "webContentsDebuggingEnabled": false
+  },
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchAutoHide": true,
+      "backgroundColor": "#050a12",
+      "showSpinner": false
+    },
+    "StatusBar": {
+      "style": "LIGHT",
+      "backgroundColor": "#050a12"
+    }
+  }
+}

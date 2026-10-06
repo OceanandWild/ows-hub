@@ -1,0 +1,28 @@
+{
+  "name": "ows-hub-android",
+  "version": "3.3.5",
+  "private": true,
+  "description": "OWS Hub - app Android (Capacitor) que envuelve web/OWS",
+  "scripts": {
+    "sync": "cap sync android",
+    "open": "cap open android",
+    "apk": "cd android && gradlew assembleRelease",
+    "assets": "capacitor-assets generate --android"
+  },
+  "dependencies": {
+    "@capacitor-community/file-opener": "^8.0.1",
+    "@capacitor/android": "^8.5.2",
+    "@capacitor/app": "^8.1.2",
+    "@capacitor/browser": "^8.0.5",
+    "@capacitor/core": "^8.5.2",
+    "@capacitor/file-transfer": "^2.0.6",
+    "@capacitor/filesystem": "^8.1.4",
+    "@capacitor/splash-screen": "^8.0.2",
+    "@capacitor/status-bar": "^8.0.4"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "^8.5.2",
+    "esbuild": "^0.28.2"
+  }
+}

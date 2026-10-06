@@ -1,0 +1,271 @@
+name: android
+
+# Compila el APK de OWS Hub para Android (Capacitor, OWS-Android/) y publica:
+#   1. APK firmado como GitHub Release (tag android-v<versión>).
+#   2. Registro en el canal del backend (ows_android_releases) para que el
+#      Gestor de Actualizaciones del app ofrezca la instalación directa.
+# El frontend (web/OWS) NO vive en este repo: se toma de owsdatabase en cada
+# build (mismo patrón que release.yml), así que la fuente única sigue siendo
+# el monorepo.
+#
+# Secrets del repo (Settings → Secrets and variables → Actions):
+#   OWS_ADMIN_SECRET             – token admin del backend, para registrar la
+#                                  release en el canal de actualizaciones.
+#   ANDROID_SIGNING_KEY_BASE64   – (opcional) keystore en base64. Si falta, se
+#   ANDROID_KEYSTORE_PASSWORD       usa/crea un keystore local del run (ver
+#   ANDROID_KEY_ALIAS              "Keystore de firma"). Sin estos secrets la
+#   ANDROID_KEY_PASSWORD           firma NO es estable entre builds.
+#
+# Flujo de firma: si no hay secrets se intenta reutilizar el keystore de runs
+# anteriores (artefacto "owshub-android-keystore") y, si no existe, se genera
+# uno nuevo y se publica como artefacto para guardarlo como secret.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Versión del APK (ej: 3.3.6). Vacío = la de build.gradle'
+        required: false
+        default: ''
+      notes:
+        description: 'Notas de la release (opcional)'
+        required: false
+        default: ''
+  push:
+    tags:
+      - 'android-v*'
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  FRONTEND_REPO: OceanandWild/owsdatabase
+  FRONTEND_PATH: web/OWS
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch frontend (owsdatabase/web/OWS)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.FRONTEND_REPO }}
+          ref: main
+          path: .frontend-src
+          sparse-checkout: ${{ env.FRONTEND_PATH }}
+          sparse-checkout-cone-mode: false
+
+      - name: Sync frontend -> app
+        shell: pwsh
+        run: ./scripts/sync-app.ps1 -Source .frontend-src/web/OWS
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: OWS-Android/package-lock.json
+
+      - name: Instalar deps de OWS-Android
+        working-directory: OWS-Android
+        run: npm ci --legacy-peer-deps
+
+      # El bundle nativo (FileTransfer/FileOpener/getPlatform) se inyecta en el
+      # WebView SOLO cuando corre dentro de Android: sin él la descarga del APK
+      # no existe (Capacitor no trae setDownloadListener).
+      - name: Bundle nativo (app/vendor/cap-native.js)
+        working-directory: OWS-Android
+        run: |
+          set -euo pipefail
+          mkdir -p ../app/vendor
+          npx esbuild native-entry.js --bundle --minify --format=iife --target=es2020 \
+            --outfile=../app/vendor/cap-native.js
+          ls -la ../app/vendor/
+
+      - name: Resolver versión
+        id: ver
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          VER="${INPUT_VERSION:-}"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == android-v* ]]; then
+            VER="${GITHUB_REF_NAME#android-v}"
+          fi
+          if [[ -z "$VER" ]]; then
+            VER="$(grep -oP 'versionName.*?:\s*"\K[^"]+' OWS-Android/android/app/build.gradle | head -n1)"
+          fi
+          VC=$(( $(date +%s) / 60 ))
+          {
+            echo "version=$VER"
+            echo "version_code=$VC"
+          } >> "$GITHUB_OUTPUT"
+          echo "### OWS Hub Android v$VER (versionCode $VC)" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Instalar SDK de Android (compileSdk 36)
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" > /dev/null
+
+      - name: Keystore de firma
+        id: ks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNING_KEY_B64: ${{ secrets.ANDROID_SIGNING_KEY_BASE64 }}
+          SECRET_STOREPASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          SECRET_KEYPASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          SECRET_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          KS_DIR="$RUNNER_TEMP/owshub-keystore"
+          mkdir -p "$KS_DIR"
+          ALIAS="${SECRET_ALIAS:-owshub}"
+          MODE=""
+
+          if [[ -n "${SIGNING_KEY_B64:-}" ]]; then
+            printf '%s' "$SIGNING_KEY_B64" | base64 -d > "$KS_DIR/release.keystore"
+            STOREPASS="$SECRET_STOREPASS"
+            KEYPASS="$SECRET_KEYPASS"
+            MODE="secrets"
+          else
+            ART_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=owshub-android-keystore&per_page=1" --jq '.artifacts[0].id // empty' 2>/dev/null || true)"
+            RESTORED=0
+            if [[ -n "$ART_ID" ]]; then
+              if gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ART_ID}/zip" > "$KS_DIR/ks.zip" 2>/dev/null; then
+                unzip -o -q "$KS_DIR/ks.zip" -d "$KS_DIR" && rm -f "$KS_DIR/ks.zip"
+                if [[ -f "$KS_DIR/release.keystore" && -f "$KS_DIR/owshub-keystore.env" ]]; then
+                  STOREPASS="$(grep -oP '(?<=STOREPASS=).*' "$KS_DIR/owshub-keystore.env")"
+                  KEYPASS="$(grep -oP '(?<=KEYPASS=).*' "$KS_DIR/owshub-keystore.env")"
+                  ALIAS="$(grep -oP '(?<=ALIAS=).*' "$KS_DIR/owshub-keystore.env")"
+                  RESTORED=1
+                  MODE="artefacto-previo"
+                fi
+              fi
+            fi
+            if [[ "$RESTORED" -eq 0 ]]; then
+              STOREPASS="$(openssl rand -hex 16)"
+              KEYPASS="$STOREPASS"
+              keytool -genkeypair -keystore "$KS_DIR/release.keystore" \
+                -alias "$ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
+                -storepass "$STOREPASS" -keypass "$KEYPASS" \
+                -dname "CN=OWS Hub, OU=Ocean & Wild Studios, O=Ocean & Wild Studios, C=AR" > /dev/null 2>&1
+              printf 'STOREPASS=%s\nKEYPASS=%s\nALIAS=%s\n' "$STOREPASS" "$KEYPASS" "$ALIAS" > "$KS_DIR/owshub-keystore.env"
+              MODE="generado"
+            fi
+          fi
+
+          {
+            echo "OWS_KEYSTORE_PATH=$KS_DIR/release.keystore"
+            echo "OWS_KEYSTORE_PASSWORD=$STOREPASS"
+            echo "OWS_KEY_ALIAS=$ALIAS"
+            echo "OWS_KEY_PASSWORD=$KEYPASS"
+          } >> "$GITHUB_ENV"
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "Firma: $MODE (alias $ALIAS)" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$MODE" != "secrets" ]]; then
+            echo "⚠️ Sin ANDROID_SIGNING_KEY_*: la firma se mantiene vía artefacto. Pasalo a secrets para blindarlo." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Solo si se generó en ESTE run: sirve para guardarlo como secret y que
+      # las próximas builds firmen con la misma clave (sino Android rechaza
+      # la actualización por firma distinta).
+      - name: Publicar keystore como artefacto
+        if: steps.ks.outputs.mode == 'generado'
+        uses: actions/upload-artifact@v4
+        with:
+          name: owshub-android-keystore
+          path: |
+            ${{ runner.temp }}/owshub-keystore/release.keystore
+            ${{ runner.temp }}/owshub-keystore/owshub-keystore.env
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: cap sync (assets web + plugins nativos)
+        working-directory: OWS-Android
+        run: npx cap sync android
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Gradle assembleRelease
+        working-directory: OWS-Android/android
+        env:
+          OWS_VERSION_CODE: ${{ steps.ver.outputs.version_code }}
+          OWS_VERSION_NAME: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Empaquetar APK
+        id: apk
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          SRC="OWS-Android/android/app/build/outputs/apk/release/app-release.apk"
+          DEST="dist/OWS-Hub-${VERSION}-android.apk"
+          cp "$SRC" "$DEST"
+          {
+            echo "path=$DEST"
+            echo "sha256=$(sha256sum "$DEST" | cut -d' ' -f1)"
+            echo "size=$(stat -c%s "$DEST")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: GitHub Release con el APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-v${{ steps.ver.outputs.version }}
+          name: OWS Hub Android ${{ steps.ver.outputs.version }}
+          files: dist/OWS-Hub-*-android.apk
+          body: ${{ inputs.notes || format('APK de OWS Hub {0} (versionCode {1}).', steps.ver.outputs.version, steps.ver.outputs.version_code) }}
+
+      - name: Registrar release en el canal del backend
+        env:
+          BACKEND: https://owsdatabase.onrender.com
+          OWS_ADMIN_SECRET: ${{ secrets.OWS_ADMIN_SECRET }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          VERSION_CODE: ${{ steps.ver.outputs.version_code }}
+          APK_URL: https://github.com/${{ github.repository }}/releases/download/android-v${{ steps.ver.outputs.version }}/OWS-Hub-${{ steps.ver.outputs.version }}-android.apk
+          SHA256: ${{ steps.apk.outputs.sha256 }}
+          SIZE: ${{ steps.apk.outputs.size }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+          # 1) El canal exige que el proyecto exista en ows_projects (FK).
+          curl -fsS -X POST "$BACKEND/ows-store/projects" \
+            -H 'content-type: application/json' \
+            -d "{\"slug\":\"owshub\",\"name\":\"OWS Hub\",\"url\":\"https://github.com/${GITHUB_REPOSITORY}\",\"version\":\"$VERSION\",\"status\":\"launched\",\"description\":\"OWS Hub de Ocean & Wild Studios.\"}" > /dev/null
+
+          # 2) Registrar la release (requiere el secret admin del backend).
+          if [[ -z "$OWS_ADMIN_SECRET" ]]; then
+            echo "::warning::Falta OWS_ADMIN_SECRET: release publicado en GitHub pero NO registrado en el canal del backend."
+            echo "⚠️ Falta el secret OWS_ADMIN_SECRET: no se registró en el canal (no aparecerá en Actualizaciones)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          jq -n \
+            --arg slug "owshub" \
+            --arg pkg "com.oceanandwild.owshub" \
+            --arg vname "$VERSION" \
+            --argjson vcode "$VERSION_CODE" \
+            --arg url "$APK_URL" \
+            --arg sha "$SHA256" \
+            --argjson size "$SIZE" \
+            --arg notes "${NOTES:-APK de OWS Hub $VERSION}" \
+            '{project_slug:$slug, package_id:$pkg, version_name:$vname, version_code:$vcode, apk_url:$url, sha256:$sha, size_bytes:$size, release_notes:$notes, status:"published"}' \
+            > "$RUNNER_TEMP/android-release.json"
+          curl -fsS -X POST "$BACKEND/ows-store/android/releases" \
+            -H 'content-type: application/json' \
+            -H "x-ows-admin-token: $OWS_ADMIN_SECRET" \
+            -d @"$RUNNER_TEMP/android-release.json" > /dev/null
+          echo "✅ Release registrado en el canal del backend (slug owshub, v$VERSION)." >> "$GITHUB_STEP_SUMMARY"

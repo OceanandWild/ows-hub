@@ -4,3 +4,11 @@ src-tauri/gen/schemas/
 app/
 latest.json
 *.log
+!OWS-Android/android/app/
+OWS-Android/android/build/
+OWS-Android/android/app/build/
+OWS-Android/android/.gradle/
+OWS-Android/android/local.properties
+OWS-Android/android/app/release/
+*.keystore
+*.jks
