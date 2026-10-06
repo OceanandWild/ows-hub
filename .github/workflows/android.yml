@@ -109,13 +109,23 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - uses: android-actions/setup-android@v3
-
+      # Sin android-actions/setup-android: su aceptación de licencias truena
+      # con la licencia nueva del Android XR Emulator. El runner de GitHub ya
+      # trae ANDROID_HOME + sdkmanager con las licencias base aceptadas.
       - name: Instalar SDK de Android (compileSdk 36)
         run: |
           set -euo pipefail
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-36" "build-tools;36.0.0" > /dev/null
+          SDKMGR="$(command -v sdkmanager || true)"
+          if [[ -z "$SDKMGR" && -n "${ANDROID_HOME:-}" && -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]]; then
+            SDKMGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          if [[ -z "$SDKMGR" ]]; then
+            echo "sdkmanager no encontrado (ANDROID_HOME=${ANDROID_HOME:-no set})" >&2
+            exit 1
+          fi
+          echo "usando $SDKMGR"
+          yes | "$SDKMGR" --licenses > /dev/null 2>&1 || true
+          "$SDKMGR" --install "platforms;android-36" "build-tools;36.0.0" 2>&1 | tail -n 5
 
       - name: Keystore de firma
         id: ks
