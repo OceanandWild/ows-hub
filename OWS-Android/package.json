@@ -1,6 +1,6 @@
 {
   "name": "ows-hub-android",
-  "version": "3.3.5",
+  "version": "3.3.6",
   "private": true,
   "description": "OWS Hub - app Android (Capacitor) que envuelve web/OWS",
   "scripts": {
