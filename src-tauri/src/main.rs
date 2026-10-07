@@ -120,9 +120,33 @@ async fn download_installer(app: AppHandle, slug: String, url: String) -> Result
     let dir = library_root(&app)?.join(&slug);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
-    let res = reqwest::get(&url)
-        .await
-        .map_err(|e| format!("download request: {e}"))?;
+    // Timeouts anti-cuelgue (v3.4.4): sin esto, si el servidor muere a mitad
+    // de la descarga (deploy de Render, hibernación), reqwest espera PARA
+    // SIEMPRE y el Gestor queda en "Conectando…" al 0% eternamente.
+    //   - connect: el servidor tiene 30 s para aceptar la conexión.
+    //   - stall: si pasa 60 s sin llegar NI UN byte, se aborta con error
+    //     claro (el Gestor lo muestra y ofrece Reintentar).
+    // El total NO tiene límite: un juego de 472 MB en una conexión lenta
+    // tarda igual, mientras siga llegando algo.
+    const CONNECT_TIMEOUT_SECS: u64 = 30;
+    const STALL_TIMEOUT_SECS: u64 = 60;
+    let res = {
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
+            .build()
+            .map_err(|e| format!("download client: {e}"))?;
+        client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_connect() || e.is_timeout() {
+                    format!("el servidor no responde (¿actualizándose? probá en unos segundos)")
+                } else {
+                    format!("download request: {e}")
+                }
+            })?
+    };
     if !res.status().is_success() {
         return Err(format!("HTTP {}", res.status()));
     }
@@ -180,8 +204,25 @@ async fn download_installer(app: AppHandle, slug: String, url: String) -> Result
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
     let mut downloaded: u64 = 0;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("download chunk: {e}"))?;
+    loop {
+        // Watchdog: cada chunk tiene STALL_TIMEOUT_SECS para llegar. Si el
+        // servidor se cuelga a mitad del stream, esto corta en vez de
+        // quedarse en "Descargando… 0%" para siempre.
+        let chunk = match tokio::time::timeout(
+            std::time::Duration::from_secs(STALL_TIMEOUT_SECS),
+            stream.next(),
+        )
+        .await
+        {
+            Ok(Some(Ok(chunk))) => chunk,
+            Ok(Some(Err(e))) => return Err(format!("download chunk: {e}")),
+            Ok(None) => break,
+            Err(_) => {
+                drop(file);
+                let _ = std::fs::remove_file(&dest);
+                return Err("el servidor dejó de enviar datos a mitad de la descarga (¿se está actualizando?). Reintentá en unos segundos".to_string());
+            }
+        };
         file.write_all(&chunk).await.map_err(|e| e.to_string())?;
         downloaded += chunk.len() as u64;
         let _ = app.emit(

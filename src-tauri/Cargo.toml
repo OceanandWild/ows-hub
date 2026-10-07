@@ -1,6 +1,6 @@
 [package]
 name = "ows-hub"
-version = "3.4.3"
+version = "3.4.4"
 edition = "2021"
 
 [build-dependencies]
@@ -17,7 +17,7 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots", "stream"] }
-tokio = { version = "1", features = ["fs", "io-util"] }
+tokio = { version = "1", features = ["fs", "io-util", "time"] }
 futures-util = "0.3"
 zip = "2"
 
