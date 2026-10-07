@@ -10,8 +10,36 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, OnceLock,
+};
 use tauri::{AppHandle, Emitter, Manager};
+
+/// Banderas de cancelación por slug (v3.4.5): el botón Cancelar del Gestor
+/// antes solo marcaba la tarjeta (el Rust seguía descargando en segundo
+/// plano, incluso escribiendo el mismo archivo que un reintento).
+fn cancel_registry() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
+    static REG: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+    REG.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Pide abortar la descarga en curso de un juego. Lo revisa el loop de
+/// chunks: corta, borra el parcial y devuelve error de cancelación.
+#[tauri::command]
+fn cancel_download(slug: String) -> Result<bool, String> {
+    let slug = sanitize_slug(&slug);
+    let reg = cancel_registry();
+    let map = reg.lock().map_err(|e| e.to_string())?;
+    if let Some(flag) = map.get(&slug) {
+        flag.store(true, Ordering::SeqCst);
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
 
 /// %APPDATA%/OWS/library — raíz de juegos instalados.
 fn library_root(app: &AppHandle) -> Result<PathBuf, String> {
@@ -130,22 +158,32 @@ async fn download_installer(app: AppHandle, slug: String, url: String) -> Result
     // tarda igual, mientras siga llegando algo.
     const CONNECT_TIMEOUT_SECS: u64 = 30;
     const STALL_TIMEOUT_SECS: u64 = 60;
+    // TTFB: el send() (espera de headers) NO lo cubre connect_timeout.
+    // Sin esto, un servidor colgado antes del primer byte espera PARA
+    // SIEMPRE (v3.4.5: descargas eternas en 0% con el servidor dormido).
+    // 90 s es generoso (un cold start tarda <60 s); el total de la descarga
+    // NO tiene límite mientras lleguen bytes (lo cubre el watchdog de abajo).
+    const FIRST_BYTE_TIMEOUT_SECS: u64 = 90;
     let res = {
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
             .build()
             .map_err(|e| format!("download client: {e}"))?;
-        client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_connect() || e.is_timeout() {
-                    format!("el servidor no responde (¿actualizándose? probá en unos segundos)")
-                } else {
-                    format!("download request: {e}")
-                }
-            })?
+        tokio::time::timeout(
+            std::time::Duration::from_secs(FIRST_BYTE_TIMEOUT_SECS),
+            client.get(&url).send(),
+        )
+        .await
+        .map_err(|_| {
+            "el servidor tarda demasiado en responder (más de 90 s sin empezar). Reintentá en unos segundos".to_string()
+        })?
+        .map_err(|e| {
+            if e.is_connect() || e.is_timeout() {
+                format!("el servidor no responde (¿actualizándose? probá en unos segundos)")
+            } else {
+                format!("download request: {e}")
+            }
+        })?
     };
     if !res.status().is_success() {
         return Err(format!("HTTP {}", res.status()));
@@ -204,7 +242,27 @@ async fn download_installer(app: AppHandle, slug: String, url: String) -> Result
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
     let mut downloaded: u64 = 0;
+    // Bandera fresca por intento: si había una descarga anterior del mismo
+    // juego marcada como cancelada, se pisa (los intentos viejos ya
+    // terminaron con error al chequear su propia bandera).
+    let cancel_flag = {
+        let reg = cancel_registry();
+        let mut map = reg.lock().map_err(|e| e.to_string())?;
+        let flag = Arc::new(AtomicBool::new(false));
+        map.insert(slug.clone(), Arc::clone(&flag));
+        flag
+    };
+    if cancel_flag.load(Ordering::SeqCst) {
+        let _ = std::fs::remove_file(&dest);
+        return Err("descarga cancelada por el usuario".to_string());
+    }
     loop {
+        // Cancelación del Gestor: corta ya, borra el parcial.
+        if cancel_flag.load(Ordering::SeqCst) {
+            drop(file);
+            let _ = std::fs::remove_file(&dest);
+            return Err("descarga cancelada por el usuario".to_string());
+        }
         // Watchdog: cada chunk tiene STALL_TIMEOUT_SECS para llegar. Si el
         // servidor se cuelga a mitad del stream, esto corta en vez de
         // quedarse en "Descargando… 0%" para siempre.
@@ -798,6 +856,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_library_dir,
             download_installer,
+            cancel_download,
             extract_zip,
             find_game_exe,
             launch_game,
