@@ -28,6 +28,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Fail-fast: si falta GH_PAT (token con scope repo para crear la
+      # release) el publish falla AL FINAL tras compilar ~20 min, como pasó
+      # con v3.4.3 y v3.4.4. Esto lo detecta en 10 segundos.
+      - name: Validar secrets de publicación
+        shell: pwsh
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          TAURI_KEY: ${{ secrets.KEY }}
+        run: |
+          $missing = @()
+          if ([string]::IsNullOrWhiteSpace($env:GH_PAT)) { $missing += 'GH_PAT (token con scope repo, para crear la release)' }
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_KEY)) { $missing += 'KEY (clave de firma del updater)' }
+          if ($missing.Count) { throw ('Faltan secrets del repo ows-hub: ' + ($missing -join ' · ') + '. Settings → Secrets and variables → Actions.') }
+          Write-Host '[release] Secrets de publicación presentes.'
+
       - name: Fetch frontend (owsdatabase/web/OWS)
         uses: actions/checkout@v4
         with:
