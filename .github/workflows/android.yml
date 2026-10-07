@@ -243,6 +243,13 @@ jobs:
           tag_name: android-v${{ steps.ver.outputs.version }}
           name: OWS Hub Android ${{ steps.ver.outputs.version }}
           files: dist/OWS-Hub-*-android.apk
+          # prerelease: SIEMPRE para los APK. El repo ows-hub publica Windows
+          # y Android en el mismo repo, y si un APK queda como "latest release"
+          # (1) el updater de Tauri de Windows no encuentra latest.json y (2)
+          # todo lo que lea /releases/latest le sirve un APK a los de PC.
+          # El canal real de Android es ows_android_releases en el backend.
+          prerelease: true
+          make_latest: false
           body: ${{ inputs.notes || format('APK de OWS Hub {0} (versionCode {1}).', steps.ver.outputs.version, steps.ver.outputs.version_code) }}
 
       - name: Registrar release en el canal del backend
