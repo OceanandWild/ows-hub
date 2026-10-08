@@ -7,8 +7,8 @@ android {
         applicationId "com.oceanandwild.owshub"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode = (System.getenv("OWS_VERSION_CODE") ?: "342").toInteger()
-        versionName = (System.getenv("OWS_VERSION_NAME") ?: "3.4.2")
+        versionCode = (System.getenv("OWS_VERSION_CODE") ?: "346").toInteger()
+        versionName = (System.getenv("OWS_VERSION_NAME") ?: "3.4.6")
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
