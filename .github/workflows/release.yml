@@ -77,8 +77,22 @@ jobs:
             Write-Host "[release] Actualizando tauri.conf.json a $want"
             $raw = (Get-Content src-tauri/tauri.conf.json -Raw) -replace '"version":\s*"[0-9.]+"', "`"version`": `"$want`""
             [IO.File]::WriteAllText((Resolve-Path src-tauri/tauri.conf.json), $raw)
-            $toml = (Get-Content src-tauri/Cargo.toml -Raw) -replace 'version = "[0-9.]+"', "version = `"$want`""
-            [IO.File]::WriteAllText((Resolve-Path src-tauri/Cargo.toml), $toml)
+            # OJO: solo la linea de [package]. Un regex pelado sobre todo el
+            # archivo ('version = "..."') tambien pisa las versiones de las
+            # dependencias (reqwest 0.12 -> 3.4.8) y cargo revienta con
+            # "failed to select a version for the requirement". Partimos el
+            # TOML por [package] y solo se reescribe ese bloque.
+            $toml = Get-Content src-tauri/Cargo.toml -Raw
+            $idx = $toml.IndexOf('[package]')
+            if ($idx -lt 0) { throw "No se encontro la seccion [package] en Cargo.toml" }
+            $next = $toml.IndexOf('[', $idx + 1)
+            if ($next -lt 0) { $next = $toml.Length }
+            $head = $toml.Substring(0, $idx)
+            $block = $toml.Substring($idx, $next - $idx)
+            $tail = $toml.Substring($next)
+            $block = $block -replace '(?m)^version\s*=\s*"[0-9.]+"', "version = `"$want`""
+            if ($block -notmatch '(?m)^version\s*=') { throw "No se pudo fijar la version en [package]" }
+            [IO.File]::WriteAllText((Resolve-Path src-tauri/Cargo.toml), ($head + $block + $tail))
             $pkg = Get-Content package.json -Raw | ConvertFrom-Json
             $pkg.version = $want
             [IO.File]::WriteAllText((Resolve-Path package.json), ($pkg | ConvertTo-Json -Depth 10))
