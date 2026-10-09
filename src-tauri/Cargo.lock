@@ -2778,7 +2778,7 @@ dependencies = [
 
 [[package]]
 name = "ows-hub"
-version = "3.4.6"
+version = "3.4.7"
 dependencies = [
  "futures-util",
  "reqwest 0.12.28",
