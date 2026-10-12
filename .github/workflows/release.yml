@@ -99,6 +99,29 @@ jobs:
           }
           "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
+      # La etiqueta de versión del Hub (sidebar) es un texto en index.html.
+      # Si nadie la bumpea a mano queda vieja y, cuando la app no puede leer
+      # la versión del binario, el Hub se anuncia como una versión anterior a
+      # la instalada. Se inyecta acá para que no dependa de que alguien se
+      # acuerde. Nunca falla el build por esto.
+      - name: Inyectar versión en el HTML del Hub
+        shell: pwsh
+        env:
+          HUB_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          $p = "app/index.html"
+          if (-not (Test-Path $p)) { Write-Host "[version] sin app/index.html, se omite"; exit 0 }
+          $clean = "$env:HUB_VERSION" -replace '^[vV]', ''
+          if ([string]::IsNullOrWhiteSpace($clean)) { Write-Host "[version] sin versión, se omite"; exit 0 }
+          $raw = Get-Content $p -Raw
+          $new = [regex]::Replace($raw, '(class="nav-version"[^>]*>[^<]*?v)[\d.]+', ('${1}' + $clean))
+          if ($new -ne $raw) {
+            [IO.File]::WriteAllText((Resolve-Path $p), $new)
+            Write-Host "[version] nav-version -> v$clean"
+          } else {
+            Write-Host "[version] no se encontró la etiqueta nav-version"
+          }
+
       - name: Build (NSIS + MSI)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

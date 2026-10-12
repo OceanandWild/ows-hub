@@ -105,6 +105,27 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "### OWS Hub Android v$VER (versionCode $VC)" >> "$GITHUB_STEP_SUMMARY"
 
+      # Mismo motivo que en release.yml: la versión del sidebar es texto en
+      # index.html y sin esto queda vieja cuando la app no puede leerla del
+      # binario. Nunca falla el build por esto.
+      - name: Inyectar versión en el HTML del Hub
+        shell: pwsh
+        env:
+          HUB_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          $p = "app/index.html"
+          if (-not (Test-Path $p)) { Write-Host "[version] sin app/index.html, se omite"; exit 0 }
+          $clean = "$env:HUB_VERSION" -replace '^[vV]', ''
+          if ([string]::IsNullOrWhiteSpace($clean)) { Write-Host "[version] sin versión, se omite"; exit 0 }
+          $raw = Get-Content $p -Raw
+          $new = [regex]::Replace($raw, '(class="nav-version"[^>]*>[^<]*?v)[\d.]+', ('${1}' + $clean))
+          if ($new -ne $raw) {
+            [IO.File]::WriteAllText((Resolve-Path $p), $new)
+            Write-Host "[version] nav-version -> v$clean"
+          } else {
+            Write-Host "[version] no se encontró la etiqueta nav-version"
+          }
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
