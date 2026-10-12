@@ -122,6 +122,8 @@ jobs:
           if ($new -ne $raw) {
             [IO.File]::WriteAllText((Resolve-Path $p), $new)
             Write-Host "[version] nav-version -> v$clean"
+          } elseif ($raw -match 'class="nav-version"[^>]*>[^<]*?v[\d.]+') {
+            Write-Host "[version] nav-version ya estaba en v$clean"
           } else {
             Write-Host "[version] no se encontró la etiqueta nav-version"
           }
