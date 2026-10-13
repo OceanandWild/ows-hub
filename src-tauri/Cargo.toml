@@ -1,6 +1,6 @@
 [package]
 name = "ows-hub"
-version = "3.4.14"
+version = "3.4.15"
 edition = "2021"
 
 [build-dependencies]
