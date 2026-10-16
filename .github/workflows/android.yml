@@ -277,7 +277,10 @@ jobs:
 
       - name: Registrar release en el canal del backend
         env:
-          BACKEND: https://owsdatabase.onrender.com
+          # Render primario + espejo: el espejo sirve la misma API y la misma
+          # DB, así que una caída del primario (503/502/dormido) no debe dejar
+          # la release fuera del canal de Actualizaciones.
+          BACKENDS: https://owsdatabase.onrender.com https://owsdatabase2.onrender.com
           OWS_ADMIN_SECRET: ${{ secrets.OWS_ADMIN_SECRET }}
           VERSION: ${{ steps.ver.outputs.version }}
           VERSION_CODE: ${{ steps.ver.outputs.version_code }}
@@ -287,12 +290,8 @@ jobs:
           NOTES: ${{ inputs.notes }}
         run: |
           set -euo pipefail
-          # 1) El canal exige que el proyecto exista en ows_projects (FK).
-          curl -fsS -X POST "$BACKEND/ows-store/projects" \
-            -H 'content-type: application/json' \
-            -d "{\"slug\":\"owshub\",\"name\":\"OWS Hub\",\"url\":\"https://github.com/${GITHUB_REPOSITORY}\",\"version\":\"$VERSION\",\"status\":\"launched\",\"description\":\"OWS Hub de Ocean & Wild Studios.\"}" > /dev/null
-
-          # 2) Registrar la release (requiere el secret admin del backend).
+          # Sin secret admin no hay registro posible: se avisa y no se corta
+          # el job (el APK igual quedó publicado en GitHub).
           if [[ -z "$OWS_ADMIN_SECRET" ]]; then
             echo "::warning::Falta OWS_ADMIN_SECRET: release publicado en GitHub pero NO registrado en el canal del backend."
             echo "⚠️ Falta el secret OWS_ADMIN_SECRET: no se registró en el canal (no aparecerá en Actualizaciones)." >> "$GITHUB_STEP_SUMMARY"
@@ -309,8 +308,29 @@ jobs:
             --arg notes "${NOTES:-APK de OWS Hub $VERSION}" \
             '{project_slug:$slug, package_id:$pkg, version_name:$vname, version_code:$vcode, apk_url:$url, sha256:$sha, size_bytes:$size, release_notes:$notes, status:"published"}' \
             > "$RUNNER_TEMP/android-release.json"
-          curl -fsS -X POST "$BACKEND/ows-store/android/releases" \
-            -H 'content-type: application/json' \
-            -H "x-ows-admin-token: $OWS_ADMIN_SECRET" \
-            -d @"$RUNNER_TEMP/android-release.json" > /dev/null
-          echo "✅ Release registrado en el canal del backend (slug owshub, v$VERSION)." >> "$GITHUB_STEP_SUMMARY"
+
+          # 1) El canal exige que el proyecto exista en ows_projects (FK).
+          # 2) Registrar la release. Se intenta primario y espejo (2 intentos
+          #    por backend: el espejo puede estar en cold start).
+          registered=""
+          for BACKEND in $BACKENDS; do
+            for attempt in 1 2; do
+              if curl -fsS --max-time 90 -X POST "$BACKEND/ows-store/projects" \
+                   -H 'content-type: application/json' \
+                   -d "{\"slug\":\"owshub\",\"name\":\"OWS Hub\",\"url\":\"https://github.com/${GITHUB_REPOSITORY}\",\"version\":\"$VERSION\",\"status\":\"launched\",\"description\":\"OWS Hub de Ocean & Wild Studios.\"}" > /dev/null \
+                 && curl -fsS --max-time 90 -X POST "$BACKEND/ows-store/android/releases" \
+                   -H 'content-type: application/json' \
+                   -H "x-ows-admin-token: $OWS_ADMIN_SECRET" \
+                   -d @"$RUNNER_TEMP/android-release.json" > /dev/null; then
+                registered="$BACKEND"
+                break 2
+              fi
+              echo "::warning::Registro falló contra $BACKEND (intento $attempt); se reintenta."
+              sleep 8
+            done
+          done
+          if [[ -z "$registered" ]]; then
+            echo "::error::No se pudo registrar la release en el canal (ni primario ni espejo)."
+            exit 1
+          fi
+          echo "✅ Release registrada en el canal del backend vía $registered (slug owshub, v$VERSION)." >> "$GITHUB_STEP_SUMMARY"
