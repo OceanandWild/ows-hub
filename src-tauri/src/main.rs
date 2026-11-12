@@ -521,6 +521,113 @@ fn launch_game(exe_path: String) -> Result<(), String> {
 }
 
 // ═══════════════════════════════════════════════════════
+// OWS HUB APPS (instaladores de Windows)
+//
+// Bajar el instalador con el navegador deja el archivo con Mark-of-the-Web:
+// en equipos con la zona de Internet restringida Windows lo bloquea con
+// "No se pueden abrir estos archivos" (y además aparece SmartScreen por no
+// estar firmado). Si lo descarga la propia app, el archivo no lleva esa
+// marca y el instalador arranca sin esos avisos.
+// ═══════════════════════════════════════════════════════
+
+/// Carpeta propia para instaladores de OWS Hub Apps.
+fn hub_apps_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("installers");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+/// Descarga un instalador de OWS Hub Apps y devuelve su ruta local.
+#[tauri::command]
+async fn download_hub_app(app: AppHandle, slug: String, url: String) -> Result<String, String> {
+    let slug = sanitize_slug(&slug);
+    let dir = hub_apps_dir(&app)?;
+
+    let raw_name = url
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .split('?')
+        .next()
+        .unwrap_or("");
+    let cleaned: String = raw_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let name = if cleaned.is_empty() {
+        "setup.exe".to_string()
+    } else {
+        cleaned
+    };
+    let dest = dir.join(format!("{slug}-{name}"));
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("download client: {e}"))?;
+    let mut res = tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        client.get(&url).send(),
+    )
+    .await
+    .map_err(|_| "el servidor tarda demasiado en responder".to_string())?
+    .map_err(|e| format!("download request: {e}"))?;
+    if !res.status().is_success() {
+        return Err(format!("HTTP {}", res.status()));
+    }
+
+    let total = res.content_length().unwrap_or(0);
+    let mut file = std::fs::File::create(&dest).map_err(|e| e.to_string())?;
+    let mut downloaded: u64 = 0;
+    use std::io::Write;
+    while let Some(chunk) = res.chunk().await.map_err(|e| e.to_string())? {
+        file.write_all(&chunk).map_err(|e| e.to_string())?;
+        downloaded += chunk.len() as u64;
+        let _ = app.emit(
+            "ows-hub-app-progress",
+            serde_json::json!({ "slug": slug, "downloaded": downloaded, "total": total }),
+        );
+    }
+    file.flush().map_err(|e| e.to_string())?;
+    drop(file);
+
+    if downloaded == 0 {
+        let _ = std::fs::remove_file(&dest);
+        return Err("descarga vacía (0 bytes)".to_string());
+    }
+
+    Ok(dest.to_string_lossy().to_string())
+}
+
+/// Ejecuta el instalador descargado (solo dentro de la carpeta de instaladores).
+#[tauri::command]
+fn run_hub_app_installer(app: AppHandle, path: String) -> Result<(), String> {
+    let base = hub_apps_dir(&app)?
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    let target = Path::new(&path)
+        .canonicalize()
+        .map_err(|e| format!("no existe el instalador: {e}"))?;
+    if !target.starts_with(&base) {
+        return Err("instalador fuera de la carpeta de descargas".to_string());
+    }
+    std::process::Command::new(&target)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════
 // DESINSTALAR
 //
 // Borrar desde el frontend es la operación más peligrosa del Hub: `dir` viene
@@ -860,6 +967,8 @@ fn main() {
             extract_zip,
             find_game_exe,
             launch_game,
+    download_hub_app,
+    run_hub_app_installer,
             game_dir_size,
             uninstall_game,
             sweep_pending_removals
