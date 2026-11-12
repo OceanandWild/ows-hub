@@ -11,6 +11,10 @@ name: android
 # Secrets del repo (Settings → Secrets and variables → Actions):
 #   OWS_ADMIN_SECRET             – token admin del backend, para registrar la
 #                                  release en el canal de actualizaciones.
+#   OWS_ADMIN_DEVICE_ID          – dispositivo de confianza del panel admin
+#   OWS_ADMIN_TRUST_TOKEN          (alternativa al secreto estático: el run pide
+#                                  un JWT corto y el registro no depende de que
+#                                  el secreto siga vigente).
 #   ANDROID_SIGNING_KEY_BASE64   – (opcional) keystore en base64. Si falta, se
 #   ANDROID_KEYSTORE_PASSWORD       usa/crea un keystore local del run (ver
 #   ANDROID_KEY_ALIAS              "Keystore de firma"). Sin estos secrets la
