@@ -1,0 +1,23 @@
+OWS Hub 3.5.3 - Changelog
+
+=== ESPAÑOL ===
+Versión: 3.5.3
+Plataforma: Windows (NSIS + MSI) + Android (APK universal)
+Fecha: 2026-11-12
+
+Cambios:
+- OWS Hub Apps ahora lee el catálogo de aplicaciones desde el servidor y no de la copia empaquetada en el build. Antes, las versiones mostradas quedaban congeladas en la del Hub instalado: publicar WaverNote 1.0.3-beta seguía apareciendo como 1.0.1-beta.
+- Con esto, una app recién publicada o actualizada aparece al instante en el Hub, sin necesidad de actualizar el Hub para verla en su versión nueva.
+- El último catálogo correcto queda guardado en el equipo: si el Hub arranca sin conexión, las versiones que muestra siguen siendo las reales en vez de volver a la del build.
+- Sin cambios en el resto de la app.
+
+=== ENGLISH ===
+Version: 3.5.3
+Platform: Windows (NSIS + MSI) + Android (universal APK)
+Date: 2026-11-12
+
+Changes:
+- OWS Hub Apps now reads the app catalog from the server instead of the copy bundled with the build. Previously the displayed versions were frozen at the ones of the installed Hub: WaverNote 1.0.3-beta still showed up as 1.0.1-beta.
+- As a result, a newly published or updated app shows up right away in the Hub, with no need to update the Hub itself to see its new version.
+- The last working catalog is stored on the machine: if the Hub starts without a connection, the versions it shows are still the real ones instead of falling back to the build.
+- No other changes to the app.
