@@ -282,6 +282,12 @@ jobs:
           # la release fuera del canal de Actualizaciones.
           BACKENDS: https://owsdatabase.onrender.com https://owsdatabase2.onrender.com
           OWS_ADMIN_SECRET: ${{ secrets.OWS_ADMIN_SECRET }}
+          # Sesión admin alternativa: el secreto estático se rota sin aviso y
+          # el registro quedaba en 401. Con un dispositivo de confianza se pide
+          # un JWT corto al backend en cada corrida (se renueva solo 30 días
+          # cada vez que se usa).
+          OWS_ADMIN_DEVICE_ID: ${{ secrets.OWS_ADMIN_DEVICE_ID }}
+          OWS_ADMIN_TRUST_TOKEN: ${{ secrets.OWS_ADMIN_TRUST_TOKEN }}
           VERSION: ${{ steps.ver.outputs.version }}
           VERSION_CODE: ${{ steps.ver.outputs.version_code }}
           APK_URL: https://github.com/${{ github.repository }}/releases/download/android-v${{ steps.ver.outputs.version }}/OWS-Hub-${{ steps.ver.outputs.version }}-android.apk
@@ -290,11 +296,16 @@ jobs:
           NOTES: ${{ inputs.notes }}
         run: |
           set -euo pipefail
-          # Sin secret admin no hay registro posible: se avisa y no se corta
-          # el job (el APK igual quedó publicado en GitHub).
-          if [[ -z "$OWS_ADMIN_SECRET" ]]; then
-            echo "::warning::Falta OWS_ADMIN_SECRET: release publicado en GitHub pero NO registrado en el canal del backend."
-            echo "⚠️ Falta el secret OWS_ADMIN_SECRET: no se registró en el canal (no aparecerá en Actualizaciones)." >> "$GITHUB_STEP_SUMMARY"
+          # Credenciales admin: secreto estático y/o sesión JWT con un
+          # dispositivo de confianza. El backend acepta ambas por
+          # x-ows-admin-token. Sin ninguna, el APK igual queda publicado.
+          HAVE_DEVICE=""
+          if [[ -n "${OWS_ADMIN_DEVICE_ID:-}" && -n "${OWS_ADMIN_TRUST_TOKEN:-}" ]]; then
+            HAVE_DEVICE="1"
+          fi
+          if [[ -z "${OWS_ADMIN_SECRET:-}" && -z "$HAVE_DEVICE" ]]; then
+            echo "::warning::Sin credenciales admin: release publicado en GitHub pero NO registrado en el canal del backend."
+            echo "⚠️ Falta OWS_ADMIN_SECRET (o device trust): no se registró en el canal (no aparecerá en Actualizaciones)." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           jq -n \
@@ -309,23 +320,40 @@ jobs:
             '{project_slug:$slug, package_id:$pkg, version_name:$vname, version_code:$vcode, apk_url:$url, sha256:$sha, size_bytes:$size, release_notes:$notes, status:"published"}' \
             > "$RUNNER_TEMP/android-release.json"
 
+          # Pide un JWT admin corto al backend usando el dispositivo de
+          # confianza. Se renueva en cada corrida (30 días de ventana).
+          device_token() {
+            local backend="$1"
+            [[ -n "$HAVE_DEVICE" ]] || return 0
+            jq -n --arg d "$OWS_ADMIN_DEVICE_ID" --arg t "$OWS_ADMIN_TRUST_TOKEN" \
+              '{device_id:$d, trust_token:$t}' \
+              | curl -fsS --max-time 90 -X POST "$backend/ows-admin-panel/login-with-device" \
+                  -H 'content-type: application/json' --data-binary @- \
+              | jq -r '.token // empty'
+          }
+
           # 1) El canal exige que el proyecto exista en ows_projects (FK).
           # 2) Registrar la release. Se intenta primario y espejo (2 intentos
           #    por backend: el espejo puede estar en cold start).
           registered=""
           for BACKEND in $BACKENDS; do
+            # Proyecto: endpoint público, asegura la FK del canal.
+            curl -fsS --max-time 90 -X POST "$BACKEND/ows-store/projects" \
+              -H 'content-type: application/json' \
+              -d "{\"slug\":\"owshub\",\"name\":\"OWS Hub\",\"url\":\"https://github.com/${GITHUB_REPOSITORY}\",\"version\":\"$VERSION\",\"status\":\"launched\",\"description\":\"OWS Hub de Ocean & Wild Studios.\"}" \
+              > /dev/null || echo "::warning::No se pudo asegurar el proyecto owshub en $BACKEND."
+            token="${OWS_ADMIN_SECRET:-}"
+            if [[ -n "$HAVE_DEVICE" ]]; then token="$(device_token "$BACKEND" || true)"; fi
             for attempt in 1 2; do
-              if curl -fsS --max-time 90 -X POST "$BACKEND/ows-store/projects" \
+              if [[ -n "$token" ]] && curl -fsS --max-time 90 -X POST "$BACKEND/ows-store/android/releases" \
                    -H 'content-type: application/json' \
-                   -d "{\"slug\":\"owshub\",\"name\":\"OWS Hub\",\"url\":\"https://github.com/${GITHUB_REPOSITORY}\",\"version\":\"$VERSION\",\"status\":\"launched\",\"description\":\"OWS Hub de Ocean & Wild Studios.\"}" > /dev/null \
-                 && curl -fsS --max-time 90 -X POST "$BACKEND/ows-store/android/releases" \
-                   -H 'content-type: application/json' \
-                   -H "x-ows-admin-token: $OWS_ADMIN_SECRET" \
-                   -d @"$RUNNER_TEMP/android-release.json" > /dev/null; then
+                   -H "x-ows-admin-token: $token" \
+                   --data-binary @"$RUNNER_TEMP/android-release.json" > /dev/null; then
                 registered="$BACKEND"
                 break 2
               fi
               echo "::warning::Registro falló contra $BACKEND (intento $attempt); se reintenta."
+              token="$(device_token "$BACKEND" || true)"
               sleep 8
             done
           done
