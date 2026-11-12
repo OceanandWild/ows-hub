@@ -343,7 +343,10 @@ jobs:
               -d "{\"slug\":\"owshub\",\"name\":\"OWS Hub\",\"url\":\"https://github.com/${GITHUB_REPOSITORY}\",\"version\":\"$VERSION\",\"status\":\"launched\",\"description\":\"OWS Hub de Ocean & Wild Studios.\"}" \
               > /dev/null || echo "::warning::No se pudo asegurar el proyecto owshub en $BACKEND."
             token="${OWS_ADMIN_SECRET:-}"
-            if [[ -n "$HAVE_DEVICE" ]]; then token="$(device_token "$BACKEND" || true)"; fi
+            if [[ -n "$HAVE_DEVICE" ]]; then
+              fresh="$(device_token "$BACKEND" || true)"
+              if [[ -n "$fresh" ]]; then token="$fresh"; fi
+            fi
             for attempt in 1 2; do
               if [[ -n "$token" ]] && curl -fsS --max-time 90 -X POST "$BACKEND/ows-store/android/releases" \
                    -H 'content-type: application/json' \
@@ -353,7 +356,8 @@ jobs:
                 break 2
               fi
               echo "::warning::Registro falló contra $BACKEND (intento $attempt); se reintenta."
-              token="$(device_token "$BACKEND" || true)"
+              fresh="$(device_token "$BACKEND" || true)"
+              if [[ -n "$fresh" ]]; then token="$fresh"; fi
               sleep 8
             done
           done
