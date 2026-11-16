@@ -1,0 +1,23 @@
+OWS Hub 3.5.4 - Changelog
+
+=== ESPAÑOL ===
+Versión: 3.5.4
+Plataforma: Windows (NSIS + MSI) + Android (APK universal)
+Fecha: 2026-11-16
+
+Cambios:
+- Los eventos del calendario OWS ahora pueden ser combinados: en el panel se marca que un evento viene con otras cosas y se carga la lista, con nombre, detalle y link opcionales.
+- En OWS, la tarjeta del evento avisa "Este evento y X cosas más vienen juntos" y muestra las primeras etiquetas; al abrir el evento se ve la lista completa con sus detalles y enlaces.
+- Los eventos combinados se distinguen en el panel con la cantidad de cosas incluidas, y al duplicar un evento la lista se copia completa.
+- Sin cambios en el resto de la app.
+
+=== ENGLISH ===
+Version: 3.5.4
+Platform: Windows (NSIS + MSI) + Android (universal APK)
+Date: 2026-11-16
+
+Changes:
+- Calendar events in OWS can now be combined: the panel lets you mark that an event comes with other things and fill in the list, with an optional name, detail and link.
+- In OWS, the event card says "This event and X more things come together" and shows the first labels; opening the event displays the full list with details and links.
+- Combined events are marked in the panel with the number of included things, and duplicating an event copies the whole list.
+- No changes anywhere else in the app.
