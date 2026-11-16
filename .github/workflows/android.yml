@@ -66,6 +66,28 @@ jobs:
         shell: pwsh
         run: ./scripts/sync-app.ps1 -Source .frontend-src/web/OWS
 
+      # Mismo guard que release.yml: si el index.html del panel pide CSS/JS
+      # que no estan en el repo, el APK se arma igual y queda sin estilos.
+      - name: Validar assets locales del frontend
+        shell: pwsh
+        run: |
+          $dir = "app/admin"
+          $index = Join-Path $dir "index.html"
+          if (-not (Test-Path $index)) { Write-Host "[assets] sin $index, se omite"; exit 0 }
+          $html = Get-Content $index -Raw
+          $refs = [regex]::Matches($html, '(?:href|src)="([^"?#]+\.(?:css|js))(?:[?#][^"]*)?"') |
+            ForEach-Object { $_.Groups[1].Value } |
+            Where-Object { $_ -notmatch '^(?:https?:)?//' } |
+            Sort-Object -Unique
+          $missing = @()
+          foreach ($r in $refs) {
+            if (-not (Test-Path (Join-Path $dir $r))) { $missing += $r }
+          }
+          if ($missing.Count -gt 0) {
+            throw ("[assets] $index referencia archivos inexistentes: " + ($missing -join ', '))
+          }
+          Write-Host "[assets] $($refs.Count) referencias locales OK"
+
       - uses: actions/setup-node@v4
         with:
           # Capacitor CLI 8 exige Node >= 22.
